@@ -118,13 +118,17 @@ class TravelAgentUI:
         return await self.agent.get_chat_history(new_user_id, n=-1)
     
     async def clear_chat_history(self) -> List[dict]:
-        """Clear chat history for the current user from Redis and UI."""
+        """Clear chat history for the current user from Agent Memory Server and UI."""
         if not self.current_user_id:
             return []
         try:
-            # Get the user context and clear its Redis history
+            # Clear working memory for the current user
             ctx = self.agent._get_or_create_user_ctx(self.current_user_id)
-            await ctx.agent.model_context.clear()
+            client = await self.agent.get_client()
+            await client.clear_working_memory(
+                session_id=ctx.session_id,
+                namespace=self.agent._get_namespace(self.current_user_id)
+            )
             print(f"✅ Cleared chat history for user: {self.current_user_id}")
             return []
         except Exception as e:
@@ -352,12 +356,12 @@ class TravelAgentUI:
                     
                     # After streaming completes, store conversation memory asynchronously
                     if final_response and not final_response.endswith('●●●</span>'):
-                        # Create a background task to store memory without blocking
+                        # Create a background task to store assistant response without blocking
                         import asyncio
                         asyncio.create_task(
-                            self.agent.store_memory(
+                            self.agent.store_assistant_response(
                                 self.current_user_id, 
-                                message, 
+                                final_response
                             )
                         )
                     

@@ -19,4 +19,5 @@ dependencies = [
   "typing-extensions>=4.0.0",
   "redisvl==0.8.2",
   "ics>=0.7.2",
+  "langchain-openai>=1.0.1",
 ]

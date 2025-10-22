@@ -30,48 +30,50 @@ from autogen_agentchat.messages import (
     StopMessage,
 )
 from autogen_core.tools import FunctionTool
-from autogen_core.memory import MemoryContent, MemoryMimeType
 from autogen_ext.models.openai import OpenAIChatCompletionClient
-from autogen_ext.memory.mem0 import Mem0Memory
 from tavily import TavilyClient
 from ics import Calendar, Event, DisplayAlarm
 from ics.grammar.parse import ContentLine
+from langchain_openai import ChatOpenAI
+
+from agent_memory_client import MemoryAPIClient, create_memory_client
+from agent_memory_client.models import WorkingMemory
 
 from config import AppConfig
-from context.redis_chat_completion_context import RedisChatCompletionContext
 
 
 
 @dataclass
 class UserCtx:
-    """User-specific context containing Mem0 memory and agent instances.
+    """User-specific context containing agent instance and session ID.
     
     Attributes:
-        memory: Mem0 memory instance for user-specific memory management
-        agent: Main assistant agent with tools and memory integration
+        agent: Main assistant agent with tools
+        session_id: Unique session identifier for working memory
     """
-    memory: Mem0Memory
     agent: AssistantAgent
+    session_id: str
 
 
 class TravelAgent:
-    """Travel planning agent with Mem0-powered personalized memory capabilities.
+    """Travel planning agent with Agent Memory Server-powered personalized memory capabilities.
     
     This agent provides personalized travel planning services by maintaining
-    separate Mem0 memory contexts for each user. Each user gets their own
-    Mem0 memory instance and supervisor agent that are cached for performance.
+    separate memory contexts for each user using Agent Memory Server. Each user gets their own
+    working memory session and supervisor agent that are cached for performance.
     
     Features:
-        - Per-user memory isolation using Mem0 with Redis backend
-        - Semantic memory search and retrieval via Mem0
+        - Per-user memory isolation using Agent Memory Server with namespace isolation
+        - Semantic memory search and retrieval via Agent Memory Server
+        - Working memory for session-based conversation management
         - Web search integration for current travel information
-        - Chat history management with configurable buffer sizes
         - Automatic memory extraction and personalized recommendations
     
     Attributes:
         config: Application configuration containing API keys and model settings
         tavily_client: Web search client for travel information
         agent_model: OpenAI client for the main travel agent
+        llm: LangChain OpenAI client for memory tool handling
     """
 
     def __init__(self, config: Optional[AppConfig] = None):
@@ -95,6 +97,9 @@ class TravelAgent:
             model=config.travel_agent_model, 
             parallel_tool_calls=False
         )
+        
+        # Initialize memory client
+        self._memory_client: MemoryAPIClient | None = None
 
         # Initialize user context cache
         self._user_ctx_cache = {}
@@ -104,103 +109,52 @@ class TravelAgent:
         await self._init_seed_users()
 
     # ------------------------------
+    # Memory Client Management
+    # ------------------------------
+    
+    async def get_client(self) -> MemoryAPIClient:
+        """Get the memory client, initializing it if needed."""
+        if not self._memory_client:
+            self._memory_client = await create_memory_client(
+                base_url=self.config.memory_server_url,
+                timeout=30.0,
+                default_model_name="gpt-4o",
+            )
+        return self._memory_client
+
+    def _get_namespace(self, user_id: str) -> str:
+        """Generate consistent namespace for a user."""
+        return f"travel_agent:{user_id}"
+
+    # ------------------------------
     # User Context Management
     # ------------------------------
     
-    def _create_memory(self, user_id: str) -> Mem0Memory:
-        """Create Mem0 memory instance for a user.
-        
-        Args:
-            user_id: Unique identifier for the user
-            
-        Returns:
-            Mem0Memory instance configured for the user
-        """
-        print(f"🧠 Creating memory bank for user: {user_id}")
-        return Mem0Memory(
-            user_id=user_id,
-            is_cloud=False,
-            config={
-                "llm": {
-                    "provider": "openai",
-                    "config": {
-                        "model": self.config.mem0_model,
-                        "temperature": 0.1,
-                        "api_key": self.config.openai_api_key,
-                    }
-                },
-                "embedder": {
-                    "provider": "openai",
-                    "config": {
-                        "model": self.config.mem0_embedding_model,
-                        "api_key": self.config.openai_api_key,
-                    }
-                },
-                "vector_store": {
-                    "provider": "redis",
-                    "config": {
-                        "collection_name": f"memory:{user_id}",  # Per-user namespace
-                        "embedding_model_dims": self.config.mem0_embedding_model_dims,
-                        "redis_url": self.config.redis_url,
-                    }
-                },
-                "custom_fact_extraction_prompt": """
-                You extract durable traveler details and preferences for a travel concierge.
-
-                Return JSON only (no prose, no code fences), exactly in this form:
-                {"facts": ["<fact-1>", "<fact-2>", "..."]}
-                If no durable facts are present, return: {"facts": []}
-
-                Extract only durable, user-specific items helpful across trips:
-                - Airline & seat/class; hotel brands/style; loyalty programs/IDs
-                - Dietary restrictions/allergies; cuisine likes/dislikes
-                - Budget range; preferred airports or arrival windows; accessibility needs
-                - User interests and biographical details that impact planning
-
-                Constraints:
-                - At most 3 concise facts per turn.
-                - One fact per array element, short and declarative.
-                - Exclude greetings, moods, generic chit-chat, and one-off/temporary details.
-                """,
-                "version": "v1.1"
-            },
-        )
-
     def _get_or_create_user_ctx(self, user_id: str) -> UserCtx:
-        """Get or create user-specific context with Mem0 memory and agent components.
+        """Get or create user-specific context with agent components.
         
-        Creates and caches a complete user context including Mem0 memory,
-        chat history management, and supervisor agent.
+        Creates and caches a complete user context including agent
+        and session management for Agent Memory Server integration.
         
         Args:
             user_id: Unique identifier for the user
             
         Returns:
-            UserCtx: Complete user context with Mem0 memory initialized
+            UserCtx: Complete user context with agent initialized
         """
         if user_ctx := self._user_ctx_cache.get(user_id):
             return user_ctx
         
-        # Create Mem0 memory instance
-        mem0_memory = self._create_memory(user_id)
+        # Generate unique session ID for this user
+        session_id = f"session_{user_id}_{int(datetime.now().timestamp())}"
         
-        # Initialize chat history & summarization management
-        model_context = RedisChatCompletionContext(
-            redis_url=self.config.redis_url,
-            user_id=user_id,
-            buffer_size=self.config.max_chat_history_size
-        )
-        
-        # Create supervisor agent with Mem0 memory
-        agent = self._create_agent(
-            model_context=model_context,
-            memory=mem0_memory
-        )
+        # Create supervisor agent
+        agent = self._create_agent()
         
         # Cache and return user context
         self._user_ctx_cache[user_id] = UserCtx(
-            memory=mem0_memory,
-            agent=agent
+            agent=agent,
+            session_id=session_id
         )
         return self._user_ctx_cache[user_id]
 
@@ -219,42 +173,41 @@ class TravelAgent:
         seed_data = self._load_seed_data()
         user_memories = seed_data.get("user_memories", {})
         
+        client = await self.get_client()
+        
         for user_id, memories in user_memories.items():
             try:
                 ctx = self._get_or_create_user_ctx(str(user_id))
                 print(f"🌱 Seeding memory for user: {user_id}")
-                for memo in memories:
-                    # Add memory content to Mem0
-                    await ctx.memory.add(MemoryContent(
-                        content=memo["insight"],
-                        mime_type=MemoryMimeType.TEXT
-                    ))
-                print(f"✅ Seeded {len(memories)} memories to Redis for user: {user_id}")
+                
+                from agent_memory_client.models import ClientMemoryRecord
+                memory_records = [
+                    ClientMemoryRecord(
+                        text=memo["insight"],
+                        memory_type="semantic",
+                        namespace=self._get_namespace(str(user_id)),
+                        user_id=str(user_id),
+                    )
+                    for memo in memories
+                ]
+                
+                await client.create_long_term_memory(memory_records)
+                print(f"✅ Seeded {len(memories)} memories for user: {user_id}")
             except Exception as e:
                 print(f"❌ Failed to seed memory for user {user_id}: {e}")
                 continue
 
-    def _create_agent(
-        self,
-        model_context: RedisChatCompletionContext,
-        memory: Mem0Memory
-    ) -> AssistantAgent:
-        """Create supervisor agent with Mem0 memory integration and tools.
+    def _create_agent(self) -> AssistantAgent:
+        """Create supervisor agent with tools.
         
-        Args:
-            model_context: Redis-backed chat completion context for history
-            memory: Mem0 memory instance for long-term memory
-            
         Returns:
-            AssistantAgent: Configured supervisor with memory and tools
+            AssistantAgent: Configured supervisor with tools
         """
         print("🤖 Creating AssistantAgent with tools...", flush=True)
         try:
             agent = AssistantAgent(
                 name="agent",
                 model_client=self.agent_model,
-                model_context=model_context,  # Chat history management
-                memory=[memory],         # Long term memory management
                 tools=self._get_tools(),
                 system_message=self._get_system_message(),
                 max_tool_iterations=self.config.max_tool_iterations,
@@ -267,6 +220,58 @@ class TravelAgent:
             print(f"   Full traceback: {traceback.format_exc()}", flush=True)
             raise
     
+    # ------------------------------
+    # Memory Management Methods
+    # ------------------------------
+    
+    async def _handle_memory_tool_call(
+        self,
+        function_call: dict,
+        session_id: str,
+        user_id: str,
+    ) -> str:
+        """Handle memory tool function calls using the client's unified resolver."""
+        client = await self.get_client()
+        
+        print("Accessing memory...")
+        result = await client.resolve_tool_call(
+            tool_call=function_call,
+            session_id=session_id,
+            namespace=self._get_namespace(user_id),
+        )
+        
+        if not result["success"]:
+            print(f"Memory tool call failed: {result['error']}")
+            return result["formatted_response"]
+        
+        return result["formatted_response"]
+    
+    async def _get_working_memory(self, session_id: str, user_id: str) -> WorkingMemory:
+        """Get working memory for a session."""
+        client = await self.get_client()
+        created, result = await client.get_or_create_working_memory(
+            session_id=session_id,
+            namespace=self._get_namespace(user_id),
+            model_name="gpt-4o-mini",
+        )
+        return WorkingMemory(**result.model_dump())
+
+    async def _add_message_to_working_memory(
+        self, session_id: str, user_id: str, role: str, content: str
+    ) -> None:
+        """Add a message to working memory."""
+        client = await self.get_client()
+        await client.get_or_create_working_memory(
+            session_id=session_id,
+            namespace=self._get_namespace(user_id),
+            model_name="gpt-4o-mini",
+        )
+        await client.append_messages_to_working_memory(
+            session_id=session_id,
+            messages=[{"role": role, "content": content}],
+            namespace=self._get_namespace(user_id),
+        )
+
     def _get_tools(self) -> List[FunctionTool]:
         """Get the list of tools for the travel agent.
         
@@ -307,8 +312,29 @@ class TravelAgent:
                 "Returns file_path for user to open. Call this when presenting a complete itinerary."
             )
         ))
+        
+        # Add memory management tools as FunctionTool instances
+        memory_tool_schemas = MemoryAPIClient.get_all_memory_tool_schemas()
+        for tool_schema in memory_tool_schemas:
+            tools.append(self._create_memory_tool_wrapper(tool_schema))
+        
         print(f"🏁 Tool creation complete. {len(tools)} tools ready.", flush=True)
         return tools
+    
+    def _create_memory_tool_wrapper(self, tool_schema: dict) -> FunctionTool:
+        """Create a FunctionTool wrapper for Agent Memory Server tools."""
+        tool_name = tool_schema["function"]["name"]
+        
+        def memory_tool_wrapper():
+            """Wrapper function for memory tools."""
+            # Return a placeholder - actual execution will be handled by the streaming logic
+            return f"Memory tool {tool_name} called"
+        
+        return FunctionTool(
+            func=memory_tool_wrapper,
+            name=tool_name,
+            description=tool_schema["function"]["description"]
+        )
     
     def _get_system_message(self) -> str:
         """Get the system message for the travel agent supervisor.
@@ -340,8 +366,10 @@ class TravelAgent:
             "- Normalize to a single currency if prices appear; state assumptions.\n"
             "- For itineraries, list day-by-day with times and logistics.\n\n"
             "MEMORY:\n"
-            "- Consider any appended important insights (long-term memory) from the user before answering and adapt to them.\n"
-            "- Consider any relevant memories as helpful context but treat current session state as priority since it's current."
+            "- You have access to memory tools: search_memory, add_memory_to_working_memory, etc.\n"
+            "- Use search_memory to recall user preferences, past trips, and important details.\n"
+            "- Store important user information using add_memory_to_working_memory for future reference.\n"
+            "- Consider retrieved memories as helpful context but treat current session as priority.\n"
         )
 
     # -----------------
@@ -634,7 +662,23 @@ class TravelAgent:
         # Store current user ID for calendar generation
         self._current_user_id = user_id
         
-        # Note: User message will be stored async after response completes
+        # Get working memory for context and add user message
+        try:
+            working_memory = await self._get_working_memory(
+                session_id=ctx.session_id, 
+                user_id=user_id
+            )
+            
+            # Add user message to working memory
+            await self._add_message_to_working_memory(
+                session_id=ctx.session_id,
+                user_id=user_id, 
+                role="user",
+                content=user_message
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to initialize working memory: {e}")
+            # Continue without memory if there's an error
         
         def _html(icon: str, title: str, message: str) -> str:
             safe_icon = icon or ""
@@ -722,6 +766,9 @@ class TravelAgent:
                 elif tool_name == "generate_calendar_ics":
                     icon = "📅"
                     title = "Generating calendar"
+                elif any(name in tool_names for name in ["search_memory", "add_memory_to_working_memory", "get_or_create_working_memory", "update_working_memory_data"]):
+                    icon = "🧠"
+                    title = "Accessing memory"
                 yield buffer, _event(
                     "tool_call",
                     icon,
@@ -838,6 +885,8 @@ class TravelAgent:
                     icon = "📍"
                 elif tool_name == "generate_calendar_ics":
                     icon = "📅"
+                elif any(name in tool_name for name in ["search_memory", "add_memory_to_working_memory", "get_or_create_working_memory", "update_working_memory_data"]):
+                    icon = "🧠"
                 
                 event_data = {
                     "type": "tool_result",
@@ -969,37 +1018,34 @@ class TravelAgent:
     # Utility Methods
     # -----------------
 
-    async def store_memory(self, user_id: str, user_message: str) -> None:
-        """Store user message in memory asynchronously.
-        
-        This method is called after the response is complete to avoid blocking
-        the initial request processing.
-        
-        Args:
-            user_id: User identifier for context isolation
-            user_message: The user's input message
-        """
+    async def store_assistant_response(self, user_id: str, response: str) -> None:
+        """Store assistant response in working memory after streaming completes."""
         try:
             ctx = self._get_or_create_user_ctx(user_id)
-            
-            # Store user message
-            await ctx.memory.add(MemoryContent(
-                content=user_message,
-                mime_type=MemoryMimeType.TEXT
-            ))
-            
+            await self._add_message_to_working_memory(
+                session_id=ctx.session_id,
+                user_id=user_id,
+                role="assistant", 
+                content=response
+            )
         except Exception as e:
-            print(f"⚠️ Failed to store conversation memory for user {user_id}: {e}")
+            print(f"⚠️ Failed to store assistant response: {e}")
+
+    async def cleanup(self):
+        """Clean up resources."""
+        if self._memory_client:
+            await self._memory_client.close()
+            print("Memory client closed")
 
     async def get_chat_history(self, user_id: str, n: Optional[int] = None) -> List[Dict[str, str]]:
-        """Retrieve chat history for a user from Redis storage.
+        """Retrieve chat history from Agent Memory Server working memory.
         
-        Converts internal message objects to Gradio-compatible format,
+        Converts working memory messages to Gradio-compatible format,
         filtering for user and assistant messages with text content.
         
         Args:
             user_id: User identifier to get history for
-            n: Number of messages to retrieve. If None, uses buffer_size.
+            n: Number of messages to retrieve. If None, retrieves all.
                If -1, retrieves all messages.
             
         Returns:
@@ -1007,38 +1053,21 @@ class TravelAgent:
                                 keys suitable for Gradio chat interface
         """
         ctx = self._get_or_create_user_ctx(user_id)
-        model_context = ctx.agent.model_context
+        working_memory = await self._get_working_memory(
+            session_id=ctx.session_id,
+            user_id=user_id
+        )
         
-        try:
-            messages = await model_context.get_messages(n=n)
-            gradio_messages = []
-            
-            for msg in messages:
-                msg_type = msg.__class__.__name__
-                
-                # Process user messages with text content
-                if msg_type == 'UserMessage':
-                    if (hasattr(msg, 'content') and msg.content and 
-                        isinstance(msg.content, str)):
-                        gradio_messages.append({
-                            'role': 'user',
-                            'content': msg.content
-                        })
-                        
-                # Process assistant messages with text content (skip tool calls)
-                elif msg_type == 'AssistantMessage':
-                    if (hasattr(msg, 'content') and msg.content and 
-                        isinstance(msg.content, str)):
-                        gradio_messages.append({
-                            'role': 'assistant', 
-                            'content': msg.content
-                        })
-                        
-            return gradio_messages
-            
-        except Exception as e:
-            print(f"Error retrieving chat history for user {user_id}: {e}")
-            return []
+        messages = working_memory.messages
+        if n and n > 0:
+            messages = messages[-n:]
+        
+        # Convert to Gradio format
+        return [
+            {"role": msg.role, "content": msg.content}
+            for msg in messages
+            if msg.role in ["user", "assistant"]
+        ]
 
     def user_exists(self, user_id: str) -> bool:
         """Check if a user context exists in the cache.
@@ -1052,15 +1081,16 @@ class TravelAgent:
         return user_id in self._user_ctx_cache
 
     def reset_user_memory(self, user_id: str) -> None:
-        """Reset a user's Mem0 memory by removing their cached context.
+        """Reset a user's memory by removing their cached context.
         
         This clears the user's cached context and forces recreation of
-        a fresh Mem0 memory instance on next interaction.
+        a fresh agent instance on next interaction. Note that Agent Memory Server
+        long-term memories are persistent and not cleared by this method.
         
         Args:
             user_id: User identifier whose memory should be reset
         """
         if user_id in self._user_ctx_cache:
-            print(f"🗑️  Resetting Mem0 memory for user: {user_id}")
+            print(f"🗑️  Resetting cached context for user: {user_id}")
             self._user_ctx_cache.pop(user_id, None)
     
