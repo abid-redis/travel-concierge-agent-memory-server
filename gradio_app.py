@@ -125,7 +125,9 @@ class TravelAgentUI:
             # Clear working memory for the current user
             ctx = self.agent._get_or_create_user_ctx(self.current_user_id)
             client = await self.agent.get_client()
-            await client.clear_working_memory(
+            
+            # Use delete_working_memory instead of clear_working_memory
+            await client.delete_working_memory(
                 session_id=ctx.session_id,
                 namespace=self.agent._get_namespace(self.current_user_id)
             )
@@ -135,6 +137,9 @@ class TravelAgentUI:
             print(f"❌ Error clearing chat history for user {self.current_user_id}: {e}")
             return []
     
+    # Memory storage methods temporarily disabled to avoid event loop issues
+    # TODO: Implement proper memory storage solution
+
     def create_interface(self) -> gr.Interface:
         """Create and return the Gradio interface."""
         
@@ -354,16 +359,10 @@ class TravelAgentUI:
                         download_visible = calendar_generated or (latest_calendar_file is not None)
                         yield history, events, events_html, latest_calendar_file, gr.update(visible=download_visible), gr.update(value="", visible=False)
                     
-                    # After streaming completes, store conversation memory asynchronously
+                    # After streaming completes, skip memory storage temporarily to avoid event loop issues
                     if final_response and not final_response.endswith('●●●</span>'):
-                        # Create a background task to store assistant response without blocking
-                        import asyncio
-                        asyncio.create_task(
-                            self.agent.store_assistant_response(
-                                self.current_user_id, 
-                                final_response
-                            )
-                        )
+                        # TODO: Implement proper memory storage without event loop conflicts
+                        print(f"📝 Conversation completed for user {self.current_user_id} (memory storage disabled)")
                     
                     # Final yield with calendar file info
                     download_visible = calendar_generated or (latest_calendar_file is not None)

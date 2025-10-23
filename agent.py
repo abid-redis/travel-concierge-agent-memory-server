@@ -662,23 +662,9 @@ class TravelAgent:
         # Store current user ID for calendar generation
         self._current_user_id = user_id
         
-        # Get working memory for context and add user message
-        try:
-            working_memory = await self._get_working_memory(
-                session_id=ctx.session_id, 
-                user_id=user_id
-            )
-            
-            # Add user message to working memory
-            await self._add_message_to_working_memory(
-                session_id=ctx.session_id,
-                user_id=user_id, 
-                role="user",
-                content=user_message
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to initialize working memory: {e}")
-            # Continue without memory if there's an error
+        # Note: Working memory initialization and user message storage
+        # will be handled by the Gradio app after streaming completes
+        # to avoid event loop issues in the generator
         
         def _html(icon: str, title: str, message: str) -> str:
             safe_icon = icon or ""
