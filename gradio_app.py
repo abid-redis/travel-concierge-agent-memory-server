@@ -125,7 +125,7 @@ class TravelAgentUI:
             # Clear working memory for the current user
             ctx = self.agent._get_or_create_user_ctx(self.current_user_id)
             client = await self.agent.get_client()
-            await client.clear_working_memory(
+            await client.delete_working_memory(
                 session_id=ctx.session_id,
                 namespace=self.agent._get_namespace(self.current_user_id)
             )
