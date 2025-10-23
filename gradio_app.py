@@ -216,7 +216,7 @@ class TravelAgentUI:
                 <div style="text-align: center; margin: 8px 0; font-family: 'Space Grotesk', sans-serif;">
                     <h1 style="color: #FFFFFF; margin-bottom: 10px; font-weight: 500;">🌍 AI Travel Concierge</h1>
                     <p style="color: #DCFF1E; font-size: 18px; font-weight: 500;">
-                        Your intelligent travel planning assistant powered by AI & Long Term Memory
+                        Your intelligent travel planning assistant powered by Redis Agent Memory Server
                     </p>
                     <p style="color: #8A99A0; font-size: 14px;">
                         Built on Redis, Autogen, Tavily, and OpenAI
