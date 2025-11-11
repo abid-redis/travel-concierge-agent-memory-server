@@ -742,23 +742,47 @@ class TravelAgent:
         # Store current user ID for calendar generation
         self._current_user_id = user_id
 
-        # # Get working memory for context and add user message
-        # try:
-        #     working_memory = await self._get_working_memory(
-        #         session_id=ctx.session_id,
-        #         user_id=user_id
-        #     )
+        # Ensure working memory is initialized before saving user message
+        # This prevents race conditions on the first message
+        try:
+            client = await self.get_client()
+            await client.get_or_create_working_memory(
+                session_id=ctx.session_id,
+                namespace=self._get_namespace(user_id),
+                model_name="gpt-4o-mini",
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to initialize working memory: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
 
-        #     # Add user message to working memory
-        #     await self._add_message_to_working_memory(
-        #         session_id=ctx.session_id,
-        #         user_id=user_id,
-        #         role="user",
-        #         content=user_message
-        #     )
-        # except Exception as e:
-        #     print(f"⚠️ Failed to initialize working memory: {e}")
-        #     # Continue without memory if there's an error
+        # Save user message to working memory asynchronously (fire-and-forget)
+        try:
+            # Create a background task to save user message without blocking streaming
+            import asyncio
+            task = asyncio.create_task(
+                self._add_message_to_working_memory(
+                    session_id=ctx.session_id,
+                    user_id=user_id,
+                    role="user",
+                    content=user_message
+                )
+            )
+            # Add done callback to log success or failure
+            def log_result(task):
+                try:
+                    task.result()
+                    print(f"✅ Successfully stored user message for user: {user_id}", flush=True)
+                except Exception as e:
+                    print(f"⚠️ Failed to store user message: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+            task.add_done_callback(log_result)
+        except Exception as e:
+            print(f"⚠️ Failed to create task for storing user message: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            # Continue without blocking if task creation fails
 
         def _html(icon: str, title: str, message: str) -> str:
             safe_icon = icon or ""
@@ -1197,6 +1221,19 @@ class TravelAgent:
             )
         except Exception as e:
             print(f"⚠️ Failed to store assistant response: {e}")
+
+    async def store_user_message(self, user_id: str, message: str) -> None:
+        """Store user message in working memory asynchronously."""
+        try:
+            ctx = self._get_or_create_user_ctx(user_id)
+            await self._add_message_to_working_memory(
+                session_id=ctx.session_id,
+                user_id=user_id,
+                role="user",
+                content=message,
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to store user message: {e}")
 
     async def cleanup(self):
         """Clean up resources."""
